@@ -1,9 +1,26 @@
 #!/usr/bin/env bash
-# codex-worker 的 Git Bash 入口，逻辑在同目录的 codex-worker.py。
-# 关闭 MSYS 的参数路径转换：否则任务文本里以 / 开头的片段（如 /api/skills）会被改写成 Windows 路径。
-# 只把工作树参数和 @文件 参数显式转成 Windows 路径。
+# Git Bash 和 macOS/Linux 共用的入口，逻辑在同目录的 codex-worker.py。
 set -euo pipefail
-dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+script=$0
+while [ -L "$script" ]; do
+  dir="$(CDPATH= cd -P -- "$(dirname -- "$script")" && pwd)"
+  target="$(readlink "$script")"
+  case "$target" in
+    /*) script=$target ;;
+    *) script=$dir/$target ;;
+  esac
+done
+dir="$(CDPATH= cd -P -- "$(dirname -- "$script")" && pwd)"
+
+if ! command -v cygpath >/dev/null 2>&1; then
+  if command -v python3 >/dev/null 2>&1; then
+    exec python3 -I -X utf8 "$dir/codex-worker.py" "$@"
+  fi
+  exec python -I -X utf8 "$dir/codex-worker.py" "$@"
+fi
+
+# Git Bash 只转换工作树和 @文件，其余参数关闭 MSYS 转换，保留 /api/skills 等任务文本。
+# Windows 上用 python，避免选到应用商店的 python3 占位程序。
 args=("$@")
 # 工作树参数的位置：普通 0，--review <工作树> 为 1，--resume <会话ID> <工作树> 为 2。
 i=0

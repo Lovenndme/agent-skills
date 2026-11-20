@@ -18,34 +18,28 @@ r"""codex-worker：把成块任务派给本机 Codex CLI（codex exec），在�
   - 工作树必须是 `git worktree add` 建出的链接工作树：它的 git 数据在主仓库 .git 下，
     不在可写范围内，Codex 因此提交不了。主检出（.git 是目录）默认拒绝运行，
     确需运行时设 CODEX_WORKER_ALLOW_MAIN=1。
-  - 启动前清掉 http(s)_proxy / all_proxy。shell 里带的本地代理端口会让 Codex 判定
-    离线沙箱的防火墙规则要变更，于是拉起提权程序弹 UAC（无人点击即报 1223，之后 shell
-    命令全部失败）；同一个代理还会让 Responses WebSocket 握手失败、长时间重连。
-    沙箱日志里的特征是 "offline firewall settings changed (stored_ports=..., desired_ports=...)"。
+  - Windows 清掉 http(s)_proxy / all_proxy，避免本地代理端口触发离线沙箱的防火墙提权和 UAC。
+    macOS/Linux 保留代理设置。
   - 项目说明上限调到 128KB（project_doc_max_bytes）：Codex 默认只加载 AGENTS.md 前 32KB，
     大型项目的 AGENTS.md 常超过这个长度（实测有 70KB 以上的），会被截掉一半。
-  - Maven 项目（工作树根目录有 pom.xml）自动配好离线测试环境，让 Codex 能自己跑 `mvn -o`：
-    · MAVEN_OPTS 加 -Dmaven.repo.local=<D 盘的 Maven 仓库副本>，派活前用 robocopy 从本账户
-      ~/.m2/repository 增量同步（只复制新增或更新的文件，通常 1 秒内）。两个原因：
-      沙箱用独立的 Windows 账户执行命令，它的 ~/.m2 是空的，离线时连父 POM 都找不到；
-      而直接指向本账户 ~/.m2 时，沙箱对用户主目录下的路径调 toRealPath 会被拒绝，javac 关闭
-      多版本 jar（如 okio-jvm）时正要调它，编译报 AccessDeniedException。实测：同一个全新
-      工作树，指向 ~/.m2 连续 3 次失败，指向主目录之外的副本两次干净编译都通过。
-    · JAVA_TOOL_OPTIONS 加 -Djava.io.tmpdir=<工作树>/target/codex-tmp（仅当 target/ 已被 git 忽略）。
-      JUnit @TempDir 默认建在本账户 %TEMP% 下，沙箱账户删不掉这层目录，测试收尾报
-      AccessDeniedException。JAVA_TOOL_OPTIONS 同时作用于 Maven 和 surefire 分出的测试 JVM。
-    实测：配好后沙箱内 mvn -o 跑单测全绿、临时目录无残留。
+  - 根目录有 pom.xml 时，提示 Codex 用 mvn -o 离线跑相关测试。
+    Windows 沙箱使用独立账户。用 robocopy 将 ~/.m2/repository 增量同步到主目录外，
+    通过 MAVEN_OPTS 指向副本，避免 javac 访问主目录下的依赖 JAR 时报 AccessDeniedException。
+    target/codex-tmp 被 git 忽略时，通过 JAVA_TOOL_OPTIONS 指定 Java 临时目录，
+    让沙箱账户能清理 JUnit @TempDir。macOS/Linux 沿用调用者的 Maven 和 Java 环境。
   - 完整事件流写到 ~/.codex-worker/logs/；标准输出是精简进度和结束摘要，
     最后一行固定是「会话ID: <id>」。
 
 环境变量：
-  CODEX_EXE              codex.exe 路径；默认按 Appx 包 OpenAI.Codex 解析
+  CODEX_EXE              Codex CLI 路径。未设时，Windows 先查 OpenAI.Codex Appx，再查 PATH。
+                         macOS/Linux 先查 PATH，再试 macOS 桌面应用的候选路径。
   CODEX_WORKER_MODEL     派活 / 续跑的模型，默认 gpt-6.2-sol
   CODEX_WORKER_EFFORT    派活 / 续跑的思考强度，默认 max
   CODEX_WORKER_REVIEW_MODEL   --review 的模型，默认 gpt-6.2-astra（与实现用不同模型，交叉检查）
   CODEX_WORKER_REVIEW_EFFORT  --review 的思考强度，默认 xhigh
-  CODEX_WORKER_M2_REPO   直接指定给 Codex 用的 Maven 仓库路径（设了就不同步副本）
-  CODEX_WORKER_M2_MIRROR Maven 仓库副本位置；默认 D:\codex-m2\repository（必须在用户主目录之外）
+  CODEX_WORKER_M2_REPO   仅 Windows。指定 Codex 使用的 Maven 仓库，跳过副本同步。
+  CODEX_WORKER_M2_MIRROR 仅 Windows。默认 D:\codex-m2\repository，无 D 盘时用
+                         %SystemDrive%\codex-m2\repository。副本应在用户主目录之外。
   CODEX_WORKER_ALLOW_MAIN=1  允许在主检出运行（不推荐）
 """
 
@@ -53,11 +47,14 @@ import base64
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+IS_WINDOWS = os.name == "nt"
 
 USAGE = (
     "用法：codex-worker <工作树> \"任务\"\n"
@@ -86,9 +83,11 @@ REVIEW_PREAMBLE = """[codex-worker 审查]
 [审查角度]
 """
 
-MAVEN_HINT = (
+MAVEN_TEST_HINT = "用 `mvn -o` 离线只跑与改动直接相关的测试；缺依赖导致跑不起来时写进交付说明。"
+
+WINDOWS_MAVEN_HINT = (
     "- 这是 Maven 项目：本地仓库已通过 MAVEN_OPTS 指向派活方同步好的仓库副本，Java 临时目录指向 target/codex-tmp。"
-    "用 `mvn -o` 离线只跑与改动直接相关的测试；缺依赖导致跑不起来时写进交付说明。"
+    f"{MAVEN_TEST_HINT}"
     "尽量不用 mvn clean（会删掉 target/codex-tmp），确需 clean 时先重建该目录再跑测试。"
     "编译若报某个依赖 JAR 的 AccessDeniedException，不要排查沙箱权限，写进交付说明即可。\n"
 )
@@ -169,22 +168,42 @@ def check_worktree(path):
 
 
 def find_codex():
-    # 不用 ~/.codex/.sandbox-bin/codex.exe：那是沙箱辅助程序的落地副本，版本会落后于应用本体。
     p = os.environ.get("CODEX_EXE")
     if p:
-        if Path(p).is_file():
-            return p
-        die(f"CODEX_EXE 指向的文件不存在：{p}")
-    r = subprocess.run(
-        ["powershell", "-NoProfile", "-Command",
-         "(Get-AppxPackage OpenAI.Codex | Select-Object -First 1).InstallLocation"],
-        capture_output=True, text=True,
-    )
-    loc = r.stdout.strip()
-    exe = Path(loc) / "app" / "resources" / "codex.exe" if loc else None
-    if not exe or not exe.is_file():
-        die("找不到 Codex CLI（未安装 Codex 桌面应用？）。可设 CODEX_EXE 指定 codex.exe")
-    return str(exe)
+        if not Path(p).is_file():
+            die(f"CODEX_EXE 指向的文件不存在：{p}")
+        if not IS_WINDOWS and not os.access(p, os.X_OK):
+            die(f"CODEX_EXE 指向的文件不可执行：{p}")
+        return p if IS_WINDOWS else os.path.abspath(p)
+
+    if IS_WINDOWS:
+        # Appx 中的是应用本体，~/.codex/.sandbox-bin 中的沙箱副本版本可能落后。
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-AppxPackage OpenAI.Codex | Select-Object -First 1).InstallLocation"],
+                capture_output=True, text=True,
+            )
+            loc = r.stdout.strip()
+        except OSError:
+            loc = ""
+        if loc:
+            exe = Path(loc) / "app" / "resources" / "codex.exe"
+            if exe.is_file():
+                return str(exe)
+
+    p = shutil.which("codex")
+    if p:
+        return p if IS_WINDOWS else os.path.abspath(p)
+
+    if not IS_WINDOWS:
+        app_cli = Path("Codex.app") / "Contents" / "Resources" / "codex"
+        for apps_dir in (Path("/Applications"), Path.home() / "Applications"):
+            exe = apps_dir / app_cli
+            if exe.is_file() and os.access(exe, os.X_OK):
+                return str(exe)
+
+    die("找不到 Codex CLI。请安装 Codex CLI 并登录，或设 CODEX_EXE 指定可执行文件路径")
 
 
 def current_account():
@@ -213,14 +232,33 @@ def warn(msg):
     print(f"[codex-worker] 提示：{msg}", file=sys.stderr, flush=True)
 
 
-def sync_m2_mirror():
-    """把本账户 ~/.m2/repository 增量同步到用户主目录之外的副本，返回给 Codex 用的仓库路径。
+def codex_env():
+    if IS_WINDOWS:
+        return {k: v for k, v in os.environ.items() if k.lower() not in PROXY_VARS}
+    return os.environ.copy()
 
-    沙箱对用户主目录下的路径调 toRealPath 会被拒绝（javac 关闭多版本 jar 时调用），
-    副本放 D 盘即可避开。同步失败时退回本账户 ~/.m2，并提示编译可能报 AccessDeniedException。
+
+def sync_m2_mirror():
+    """在 Windows 上增量同步本账户 ~/.m2/repository，返回给 Codex 用的仓库路径。
+
+    副本放在用户主目录外，避免 javac 访问依赖 JAR 时被沙箱拒绝。
+    同步失败时退回本账户 ~/.m2，并提示编译可能报 AccessDeniedException。
     """
-    src = Path.home() / ".m2" / "repository"
-    dst = Path(os.environ.get("CODEX_WORKER_M2_MIRROR") or r"D:\codex-m2\repository")
+    home = Path.home()
+    src = home / ".m2" / "repository"
+    mirror = os.environ.get("CODEX_WORKER_M2_MIRROR")
+    if mirror:
+        dst = Path(mirror)
+    else:
+        drive = Path("D:/")
+        if not drive.is_dir():
+            drive = Path(f"{os.environ.get('SystemDrive') or 'C:'}/")
+        dst = drive / "codex-m2" / "repository"
+    resolved_home = home.resolve()
+    resolved_dst = dst.resolve()
+    if resolved_home == resolved_dst or resolved_home in resolved_dst.parents:
+        warn(f"Maven 仓库副本 {dst} 位于用户主目录内，沙箱编译可能报 AccessDeniedException。"
+             "请将 CODEX_WORKER_M2_MIRROR 设为主目录之外的路径")
     if not src.is_dir():
         return str(src)
     # /E 含子目录，/XO 不覆盖副本里更新的文件；不加 /PURGE，副本只增不删。
@@ -237,12 +275,15 @@ def sync_m2_mirror():
 
 
 def setup_maven(wt, env):
-    """Maven 项目才生效：改 env，返回要加进约束前言的说明；非 Maven 项目返回空串。
+    """返回 Maven 项目的离线测试提示，非 Maven 项目返回空串。
 
-    两个环境变量都按空格切分参数，路径带空格时跳过，免得把 JVM 参数切坏。
+    Windows 还会配置仓库和临时目录。两个环境变量都按空格切分参数，路径带空格时跳过。
     """
     if not (wt / "pom.xml").is_file():
         return ""
+    if not IS_WINDOWS:
+        return f"- 这是 Maven 项目。{MAVEN_TEST_HINT}\n"
+
     repo = os.environ.get("CODEX_WORKER_M2_REPO") or sync_m2_mirror()
     opts = env.get("MAVEN_OPTS", "")
     if "maven.repo.local" in opts:
@@ -269,7 +310,7 @@ def setup_maven(wt, env):
     else:
         tmp.mkdir(parents=True, exist_ok=True)
         env["JAVA_TOOL_OPTIONS"] = f"{jto} -Djava.io.tmpdir={tmp}".strip()
-    return MAVEN_HINT
+    return WINDOWS_MAVEN_HINT
 
 
 CMD_RE = re.compile(r"-Command\s+'(.*)'\s*$", re.S)
@@ -375,7 +416,7 @@ def main():
         "-c", 'approval_policy="never"',
         "-c", "project_doc_max_bytes=131072",
     ]
-    env = {k: v for k, v in os.environ.items() if k.lower() not in PROXY_VARS}
+    env = codex_env()
     maven_hint = "" if mode == "review" else setup_maven(wt, env)
 
     if mode == "review" and angle:
@@ -387,7 +428,7 @@ def main():
         prompt = ""
     elif mode == "resume":
         cmd = [codex, "exec", "resume", *common, sid, "-"]
-        prompt = task
+        prompt = f"{maven_hint}\n{task}" if maven_hint and not IS_WINDOWS else task
     else:
         cmd = [codex, "exec", *common, "-C", str(wt), "-"]
         prompt = PREAMBLE.format(wt=wt, maven=maven_hint) + task
@@ -401,8 +442,10 @@ def main():
     account = current_account()
     label = {"new": "新会话", "resume": f"续跑 {sid}",
              "review": f"审查（基准 {spec}{'，指定角度' if mode == 'review' and angle else ''}）"}[mode]
-    out(f"[codex-worker] {label}  工作树: {wt}  模型: {model}/{effort}"
-        f"{'  Maven 离线环境已配置' if maven_hint else ''}")
+    maven_status = ""
+    if maven_hint:
+        maven_status = "  Maven 离线环境已配置" if IS_WINDOWS else "  Maven 离线测试"
+    out(f"[codex-worker] {label}  工作树: {wt}  模型: {model}/{effort}{maven_status}")
     out(f"[codex-worker] 账号: {account}")
     run = Run()
     start = time.time()
