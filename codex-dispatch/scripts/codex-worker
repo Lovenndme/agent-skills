@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# codex-worker 的 Git Bash 入口，逻辑在同目录的 codex-worker.py。
+# 关闭 MSYS 的参数路径转换：否则任务文本里以 / 开头的片段（如 /api/skills）会被改写成 Windows 路径。
+# 只把工作树参数和 @文件 参数显式转成 Windows 路径。
+set -euo pipefail
+dir="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+args=("$@")
+# 工作树参数的位置：普通 0，--review <工作树> 为 1，--resume <会话ID> <工作树> 为 2。
+i=0
+case "${args[0]:-}" in
+  --review) i=1 ;;
+  --resume) i=2 ;;
+esac
+if [ "${#args[@]}" -gt "$i" ]; then
+  args[$i]="$(cygpath -w -- "${args[$i]}")"
+fi
+# @文件 参数的位置：任务紧跟工作树；--review 的审查角度在基准之后（第 4 个）。
+j=$((i + 1))
+[ "${args[0]:-}" = "--review" ] && j=3
+if [ "${#args[@]}" -gt "$j" ] && [ "${args[$j]:0:1}" = "@" ]; then
+  args[$j]="@$(cygpath -w -- "${args[$j]:1}")"
+fi
+export MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'
+exec python -I -X utf8 "$(cygpath -w "$dir/codex-worker.py")" "${args[@]}"

@@ -1,0 +1,4 @@
+# 本机 core.autocrlf=true：不锁行尾的话，bash 入口检出后会变成 CRLF 而无法执行。
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
