@@ -46,12 +46,16 @@ skill 只在模型判断用得上时才加载，而派活必须在「准备动�
 
 ### 4. 冒烟自检（接入后做一次）
 
-在临时目录里建一个仓库和链接工作树，确认沙箱真的拦得住提交和联网。路径按你的系统调整：
+建一个一次性仓库和链接工作树，确认沙箱真的拦得住提交和联网。
+
+macOS / Linux 上不要把这个仓库建在 `mktemp -d` 或 `/tmp` 下：Codex 的 workspace-write 沙箱默认允许写 `$TMPDIR` 和 `/tmp`，仓库放在那里时它的 git 数据也可写，提交拦不住，自检会误报。同理，真实项目的主仓库也不要放在这两处。Windows 的沙箱机制不同，用 `mktemp -d` 已实测可以拦住。
 
 分三步。拦截检查要放在续跑里做：新会话的任务前面会自动加约束前言，其中「不要尝试提交和联网」会让 Codex 直接跳过这些命令，续跑不会再加前言。
 
 ```bash
-cd "$(mktemp -d)" && git init -q -b main main && git -C main commit -q --allow-empty -m init
+# macOS / Linux 建在主目录下；Windows 的 Git Bash 可以改用 cd "$(mktemp -d)"
+d="$HOME/codex-smoke-$(date +%s)" && mkdir "$d" && cd "$d"
+git init -q -b main main && git -C main commit -q --allow-empty -m init
 git -C main worktree add -q ../wt -b smoke
 
 # 第一步：新会话，确认能写工作树。记下输出最后一行的会话 ID。
@@ -75,7 +79,9 @@ codex-worker --review "$PWD/wt" main
 
 Windows 上 Codex 用 PowerShell 执行命令，`curl` 会被当成 `Invoke-WebRequest`，第二步要改用 `curl.exe -sS --max-time 8 https://example.com --output NUL`。
 
-如果 git add / commit 成功了，说明提交没被拦住，**停止使用并告诉用户**；如果 curl 连上了，说明沙箱能联网，也要告诉用户，因为规则默认 Codex 不能联网。
+如果 git add / commit 成功了，先确认自检仓库不在 `$TMPDIR` 或 `/tmp` 下；不在的话说明提交没被拦住，**停止使用并告诉用户**。如果 curl 连上了，说明沙箱能联网，也要告诉用户，因为规则默认 Codex 不能联网。
+
+自检完删掉整个目录：`cd ~ && rm -rf "$d"`。
 
 ## 常驻规则（原样复制到全局指令文件）
 
