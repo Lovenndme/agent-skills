@@ -31,7 +31,7 @@ r"""codex-worker：把成块任务派给本机 Codex CLI（codex exec），在�
     最后一行固定是「会话ID: <id>」。
 
 环境变量：
-  CODEX_EXE              Codex CLI 路径。未设时，Windows 先查 OpenAI.Codex Appx，再查 PATH。
+  CODEX_EXE              Codex CLI 路径。未设时，Windows 只查 OpenAI.Codex Appx（不回退 PATH）。
                          macOS/Linux 先查 PATH，再试 macOS 桌面应用的候选路径。
   CODEX_WORKER_MODEL     派活 / 续跑的模型，默认 gpt-6.2-sol
   CODEX_WORKER_EFFORT    派活 / 续跑的思考强度，默认 max
@@ -191,17 +191,19 @@ def find_codex():
             exe = Path(loc) / "app" / "resources" / "codex.exe"
             if exe.is_file():
                 return str(exe)
+        # Windows 不回退到 PATH：较旧 Python 的 shutil.which 在 Windows 上会先查当前目录，
+        # 可能在沙箱外执行同名程序；PATH 上的 codex.cmd 还会让参数经 cmd.exe 重新解析。
+        die("找不到 Codex CLI（未安装 Codex 桌面应用？）。可设 CODEX_EXE 指定 codex.exe")
 
     p = shutil.which("codex")
     if p:
-        return p if IS_WINDOWS else os.path.abspath(p)
+        return os.path.abspath(p)
 
-    if not IS_WINDOWS:
-        app_cli = Path("Codex.app") / "Contents" / "Resources" / "codex"
-        for apps_dir in (Path("/Applications"), Path.home() / "Applications"):
-            exe = apps_dir / app_cli
-            if exe.is_file() and os.access(exe, os.X_OK):
-                return str(exe)
+    app_cli = Path("Codex.app") / "Contents" / "Resources" / "codex"
+    for apps_dir in (Path("/Applications"), Path.home() / "Applications"):
+        exe = apps_dir / app_cli
+        if exe.is_file() and os.access(exe, os.X_OK):
+            return str(exe)
 
     die("找不到 Codex CLI。请安装 Codex CLI 并登录，或设 CODEX_EXE 指定可执行文件路径")
 

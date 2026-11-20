@@ -64,19 +64,26 @@ class FindCodexTests(unittest.TestCase):
         self.assertIn("Get-AppxPackage OpenAI.Codex", self.appx.call_args[0][0][-1])
         self.which.assert_not_called()
 
-    def test_windows_uses_path_when_appx_binary_is_missing(self):
+    # Windows 不回退到 PATH：旧版 Python 的 shutil.which 会先查当前目录，可能在沙箱外执行同名程序。
+    def test_windows_does_not_fall_back_to_path_when_appx_binary_is_missing(self):
         self.appx.return_value.stdout = str(TEST_DIR / "Codex Appx")
         self.which.return_value = self.path_cli
         with patch.object(worker, "IS_WINDOWS", True):
-            self.assertEqual(worker.find_codex(), self.path_cli)
+            with redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit) as error:
+                worker.find_codex()
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn("CODEX_EXE", stderr.getvalue())
         self.appx.assert_called_once()
-        self.which.assert_called_once_with("codex")
+        self.which.assert_not_called()
 
-    def test_windows_uses_path_when_powershell_is_unavailable(self):
+    def test_windows_does_not_fall_back_to_path_when_powershell_is_unavailable(self):
         self.appx.side_effect = FileNotFoundError()
         self.which.return_value = self.path_cli
         with patch.object(worker, "IS_WINDOWS", True):
-            self.assertEqual(worker.find_codex(), self.path_cli)
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                worker.find_codex()
+        self.assertEqual(error.exception.code, 2)
+        self.which.assert_not_called()
 
     def test_posix_prefers_path_to_app_bundle(self):
         self.which.return_value = self.path_cli
@@ -101,12 +108,13 @@ class FindCodexTests(unittest.TestCase):
         self.appx.assert_not_called()
 
     def test_missing_cli_error_explains_installation_and_override(self):
+        expected = {True: "Codex 桌面应用", False: "安装 Codex CLI 并登录"}
         for windows in (True, False):
             with self.subTest(windows=windows), patch.object(worker, "IS_WINDOWS", windows):
                 with redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit) as error:
                     worker.find_codex()
                 self.assertEqual(error.exception.code, 2)
-                self.assertIn("安装 Codex CLI 并登录", stderr.getvalue())
+                self.assertIn(expected[windows], stderr.getvalue())
                 self.assertIn("CODEX_EXE", stderr.getvalue())
 
 
