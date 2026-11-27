@@ -33,10 +33,10 @@ r"""codex-worker：把成块任务派给本机 Codex CLI（codex exec），在�
 环境变量：
   CODEX_EXE              Codex CLI 路径。未设时，Windows 只查 OpenAI.Codex Appx（不回退 PATH）。
                          macOS/Linux 先查 PATH，再试 macOS 桌面应用的候选路径。
-  CODEX_WORKER_MODEL     派活 / 续跑的模型，默认 gpt-6.2-sol
+  CODEX_WORKER_MODEL     派活 / 续跑的模型，默认 gpt-6.2-astra
   CODEX_WORKER_EFFORT    派活 / 续跑的思考强度，默认 max
-  CODEX_WORKER_REVIEW_MODEL   --review 的模型，默认 gpt-6.2-astra（与实现用不同模型，交叉检查）
-  CODEX_WORKER_REVIEW_EFFORT  --review 的思考强度，默认 xhigh
+  CODEX_WORKER_REVIEW_MODEL   --review 的模型，默认 gpt-6.2-sol（与实现用不同模型，交叉检查）
+  CODEX_WORKER_REVIEW_EFFORT  --review 的思考强度，默认 max
   CODEX_WORKER_M2_REPO   仅 Windows。指定 Codex 使用的 Maven 仓库，跳过副本同步。
   CODEX_WORKER_M2_MIRROR 仅 Windows。默认 D:\codex-m2\repository，无 D 盘时用
                          %SystemDrive%\codex-m2\repository。副本应在用户主目录之外。
@@ -69,7 +69,8 @@ PREAMBLE = """[codex-worker 约束]
 - 这是非交互运行，没有人会回答你的提问。不要停下来提问或等待确认；需要派活方确认或补充的事项（缺失的日志、有歧义的需求等）写进交付说明，其余工作按最合理的判断继续完成。
 - 你在 git 工作树 {wt} 中工作，这是唯一可写目录，不要修改它以外的文件。
 - 沙箱禁止联网和提交：不要尝试 git add/commit/push、下载依赖或访问网络。需要联网才能完成的验证（例如 Maven 首次拉依赖）写进交付说明，由派活方执行。
-{maven}- 完成后用简体中文给出交付说明：改动文件清单、关键设计取舍、已运行的验证及结果、未完成项与风险。
+{maven}- 任务描述和代码实际情况对不上时（函数不存在、行为与描述不同等），按代码实际情况处理，不要照描述硬改；在交付说明开头单独列出这些不符之处。
+- 完成后用简体中文给出交付说明：改动文件清单、关键设计取舍、已运行的验证及结果、未完成项与风险。
 
 [任务]
 """
@@ -400,13 +401,13 @@ def main():
         task = read_task(spec)
     codex = find_codex()
 
-    # 实现用 Sol / max，审查用 Astra / xhigh，让审查天然跨模型。
+    # 实现用 Astra / max，审查用 Sol / max，两个模型不同，让审查天然跨模型。
     # 两组环境变量各管各的，审查不读 CODEX_WORKER_MODEL，免得为派活临时改模型时把审查也带偏。
     if mode == "review":
-        model = os.environ.get("CODEX_WORKER_REVIEW_MODEL", "gpt-6.2-astra")
-        effort = os.environ.get("CODEX_WORKER_REVIEW_EFFORT", "xhigh")
+        model = os.environ.get("CODEX_WORKER_REVIEW_MODEL", "gpt-6.2-sol")
+        effort = os.environ.get("CODEX_WORKER_REVIEW_EFFORT", "max")
     else:
-        model = os.environ.get("CODEX_WORKER_MODEL", "gpt-6.2-sol")
+        model = os.environ.get("CODEX_WORKER_MODEL", "gpt-6.2-astra")
         effort = os.environ.get("CODEX_WORKER_EFFORT", "max")
     # exec resume / review 不接受 -s/-C，统一用 -c 覆盖配置 + 进程 cwd 指定工作目录。
     # 审查只读代码，用只读沙箱，也不需要 Maven 环境。

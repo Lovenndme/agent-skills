@@ -37,7 +37,7 @@ codex-worker --review <工作树> <基准> @angle.md       # 按指定角度审�
 ## 固定行为
 
 - 派活用 `workspace-write` 沙箱：只能写工作树和临时目录，命令没有网络。审批策略 `never`，不会卡在等待确认上。审查用 `read-only` 沙箱，不编译、不跑测试。
-- 新会话的任务前面会自动加一段约束前言：非交互运行、不要提问；只写工作树；不要尝试提交和联网；完成后用中文写交付说明。
+- 新会话的任务前面会自动加一段约束前言：非交互运行、不要提问；只写工作树；不要尝试提交和联网；任务描述和代码对不上时按代码处理，并在交付说明开头列出；完成后用中文写交付说明。
 - 项目说明加载上限调到 128KB。Codex 默认只加载 AGENTS.md 的前 32KB，大项目的 AGENTS.md 常超过这个长度。
 - 带审查角度时不走 `codex exec review`：它的 `--base` 不能和自定义指令同时用，会直接报错。这时改用普通 `codex exec` 加只读沙箱和一段审查前言，审查范围是 `git diff <基准>...HEAD`。
 - 完整事件流写到 `~/.codex-worker/logs/<时间>.jsonl`，stderr 写到同名 `.stderr.txt`。
@@ -47,8 +47,8 @@ codex-worker --review <工作树> <基准> @angle.md       # 按指定角度审�
 | 变量 | 作用 | 默认 |
 |---|---|---|
 | `CODEX_EXE` | Codex CLI 可执行文件路径 | 自动查找，见「平台差异」 |
-| `CODEX_WORKER_MODEL` / `CODEX_WORKER_EFFORT` | 派活与续跑的模型和思考强度 | `gpt-6.2-sol` / `max` |
-| `CODEX_WORKER_REVIEW_MODEL` / `CODEX_WORKER_REVIEW_EFFORT` | 审查的模型和思考强度，与上一组互不影响 | `gpt-6.2-astra` / `xhigh` |
+| `CODEX_WORKER_MODEL` / `CODEX_WORKER_EFFORT` | 派活与续跑的模型和思考强度 | `gpt-6.2-astra` / `max` |
+| `CODEX_WORKER_REVIEW_MODEL` / `CODEX_WORKER_REVIEW_EFFORT` | 审查的模型和思考强度，与上一组互不影响 | `gpt-6.2-sol` / `max` |
 | `CODEX_WORKER_M2_REPO` | 直接指定给 Codex 用的 Maven 仓库（Windows），设了就不同步副本 | — |
 | `CODEX_WORKER_M2_MIRROR` | Maven 仓库副本位置（Windows），必须在用户主目录之外 | 有 D 盘用 `D:\codex-m2\repository`，否则 `%SystemDrive%\codex-m2\repository` |
 | `CODEX_WORKER_ALLOW_MAIN` | 设为 `1` 时允许在主检出运行 | — |
@@ -80,6 +80,6 @@ macOS 与 Linux 分支只经过单测模拟，没有在真机上跑过，所以�
 - 沙箱不能联网：新依赖要派活方先下载，Codex 才能离线构建。
 - macOS / Linux 上 Codex 的 workspace-write 沙箱默认可写 `$TMPDIR` 和 `/tmp`。主仓库放在这两处时，链接工作树的 git 数据也在可写范围内，提交拦不住。
 - 强行结束 `codex-worker` 进程（而不是 Ctrl-C）时，Codex 子进程可能不会跟着退出。
-- 免费账号不支持 `gpt-6.2-astra`，审查会直接报错；改用 `CODEX_WORKER_REVIEW_MODEL` 指定别的模型。
+- 免费账号不支持 `gpt-6.2-astra`，派活会直接报错；改用 `CODEX_WORKER_MODEL` 指定别的模型。
 - macOS / Linux 上日志按默认 umask 创建，通常是 0644。多用户机器上，能进入你主目录的其他用户可以读到命令输出和模型答复；需要时自行收紧 `~/.codex-worker/` 的权限。
 - `install.sh` 要直接运行，不要通过指向它的符号链接运行；从只读挂载的仓库安装、或系统的 `ln` 不支持 `-n` 时，安装会失败。
